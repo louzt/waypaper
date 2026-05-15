@@ -72,6 +72,98 @@ def get_wallpaperengine_preview(wallpaperengine_folder: Path | str) -> List[str]
                 image_path_list.append(os.path.join(root, file))
     return image_path_list
 
+
+def get_wallpaperengine_project_dir(full_path: Path | str) -> Path:
+    full_path = Path(full_path)
+    return full_path if full_path.is_dir() else full_path.parent
+
+
+def get_wallpaperengine_project(full_path: Path | str) -> dict:
+    image_dir = get_wallpaperengine_project_dir(full_path)
+    with open(image_dir / "project.json", "r") as f:
+        project = json.load(f)
+    wallpaper_type = str(project.get("type", "unknown")).strip().lower() or "unknown"
+    project["type"] = wallpaper_type
+    project["title"] = str(project.get("title") or image_dir.name)
+    project["workshopid"] = str(project.get("workshopid") or image_dir.name)
+    return project
+
+
+def get_wallpaperengine_entry_path(full_path: Path | str) -> Path | None:
+    image_dir = get_wallpaperengine_project_dir(full_path)
+    project = get_wallpaperengine_project(image_dir)
+    entry_name = project.get("file")
+    if not entry_name:
+        return None
+
+    entry_path = image_dir / entry_name
+    if entry_path.exists():
+        return entry_path
+    return None
+
+
+def get_wallpaperengine_recommended_backend(full_path: Path | str, installed_backends: list[str] | None = None) -> str:
+    project = get_wallpaperengine_project(full_path)
+    installed_backends = installed_backends or []
+
+    if project["type"] == "video":
+        if "mpvpaper" in installed_backends:
+            return "mpvpaper"
+        if "gslapper" in installed_backends:
+            return "gslapper"
+    return "linux-wallpaperengine"
+
+
+def get_wallpaperengine_runtime_metadata(full_path: Path | str, installed_backends: list[str] | None = None) -> dict:
+    project_dir = get_wallpaperengine_project_dir(full_path)
+    project = get_wallpaperengine_project(project_dir)
+    preview_name = str(project.get("preview") or "")
+    preview_path = project_dir / preview_name if preview_name else None
+    entry_name = project.get("file")
+    entry_path = get_wallpaperengine_entry_path(project_dir)
+    recommended_backend = get_wallpaperengine_recommended_backend(project_dir, installed_backends)
+
+    runtime_path = project_dir
+    if recommended_backend in {"mpvpaper", "gslapper"} and entry_path is not None:
+        runtime_path = entry_path
+
+    compatibility_tags: list[str] = []
+    if project["type"] == "scene":
+        compatibility_tags.append("skip-disable-particles")
+    elif project["type"] == "video":
+        if recommended_backend == "mpvpaper":
+            compatibility_tags.append("handoff-mpvpaper")
+        elif recommended_backend == "gslapper":
+            compatibility_tags.append("handoff-gslapper")
+        else:
+            compatibility_tags.append("force-software-video-decoding")
+    elif project["type"] == "web":
+        compatibility_tags.append("html-js-runtime")
+
+    return {
+        "workshop_id": project["workshopid"],
+        "title": project["title"],
+        "type": project["type"],
+        "description": str(project.get("description") or ""),
+        "tags": project.get("tags", []),
+        "content_rating": project.get("contentrating"),
+        "folder_path": str(project_dir),
+        "preview_path": str(preview_path) if preview_path else None,
+        "preview_exists": bool(preview_path and preview_path.exists()),
+        "preview_extension": preview_path.suffix.lower() if preview_path else None,
+        "entry_name": entry_name,
+        "entry_path": str(entry_path) if entry_path else None,
+        "entry_exists": bool(entry_path and entry_path.exists()),
+        "entry_extension": Path(entry_name).suffix.lower() if entry_name else None,
+        "runtime_path": str(runtime_path),
+        "runtime_exists": runtime_path.exists(),
+        "runtime_kind": "file" if runtime_path.is_file() else "directory",
+        "recommended_backend": recommended_backend,
+        "compatibility_tags": compatibility_tags,
+        "has_scene_package": (project_dir / "scene.pkg").exists(),
+        "file_names": sorted(path.name for path in project_dir.iterdir()),
+    }
+
 def get_wallpaperengine_image_name(full_path: Path | str) -> str:
     full_path = Path(full_path)
     image_dir = full_path.parent
