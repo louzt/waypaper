@@ -8,7 +8,7 @@ from typing import Optional
 from pathlib import Path
 import screeninfo
 
-from waypaper.common import get_wallpaperengine_project
+from waypaper.common import get_wallpaperengine_project, get_wallpaperengine_web_compatibility_tags
 from waypaper.config import Config
 from waypaper.options import get_monitor_names_with_hyprctl, LINUX_WALLPAPERENGINE_CLAMP, \
     LINUX_WALLPAPERENGINE_FILL_OPTIONS
@@ -525,11 +525,15 @@ def change_with_linux_wallpaperengine(image_path: Path, cf: Config, monitor: str
 
     project_metadata = None
     compatibility_notes: list[str] = []
+    compatibility_tags: list[str] = []
     if not image_path.is_dir():
         try:
             project_metadata = get_wallpaperengine_project(image_path)
+            if project_metadata.get("type") == "web":
+                compatibility_tags = get_wallpaperengine_web_compatibility_tags(image_path)
         except Exception:
             project_metadata = None
+            compatibility_tags = []
 
     binary_path = resolve_linux_wallpaperengine_binary(cf)
     assets_dir = resolve_linux_wallpaperengine_assets_dir(cf, binary_path)
@@ -560,6 +564,19 @@ def change_with_linux_wallpaperengine(image_path: Path, cf: Config, monitor: str
         )
     elif cf.linux_wallpaperengine_disable_particles:
         command.append("--disable-particles")
+    if wallpaper_type == "web":
+        if "web-mouse-interaction" in compatibility_tags:
+            compatibility_notes.append(
+                "Compatibility note: this web wallpaper appears to depend on pointer or parallax interaction; on Wayland background surfaces may not receive pointer events consistently."
+            )
+        if "web-audio-reactive" in compatibility_tags or "web-wallpaper-engine-api" in compatibility_tags:
+            compatibility_notes.append(
+                "Compatibility note: this web wallpaper appears to depend on audio-reactive logic or Wallpaper Engine-specific web APIs that linux-wallpaperengine may not fully implement."
+            )
+        if "web-threejs" in compatibility_tags:
+            compatibility_notes.append(
+                "Compatibility note: this web wallpaper appears to use three.js/WebGL; compatibility depends on the embedded browser runtime."
+            )
     if cf.linux_wallpaperengine_disable_mouse:
         command.append("--disable-mouse")
     if cf.linux_wallpaperengine_disable_parallax:
@@ -587,6 +604,12 @@ def change_with_linux_wallpaperengine(image_path: Path, cf: Config, monitor: str
             log_handle.write(f"Wallpaper type: {project_metadata.get('type', 'unknown')}\n")
             if project_metadata.get("file"):
                 log_handle.write(f"Wallpaper entry file: {project_metadata['file']}\n")
+            if compatibility_tags:
+                log_handle.write(f"Compatibility tags: {', '.join(compatibility_tags)}\n")
+            if project_metadata.get("type") == "web":
+                log_handle.write(
+                    "Note: web wallpapers use a static preview image in Waypaper; motion comes from runtime HTML/JS and may depend on mouse interaction or renderer-specific web support.\n"
+                )
         for note in compatibility_notes:
             log_handle.write(f"Note: {note}\n")
         log_handle.write(f"Fullscreen pause policy: {describe_linux_wallpaperengine_pause_policy(cf)}\n")
