@@ -12,11 +12,12 @@ from pathlib import Path
 
 from waypaper.changer import change_wallpaper
 from waypaper.config import Config
-from waypaper.common import get_image_paths, get_wallpaperengine_preview, get_image_name, get_random_file, cache_image, get_cached_image_path, get_wallpaperengine_image_name
+from waypaper.common import get_image_paths, get_image_name, get_random_file, cache_image, get_cached_image_path
 from waypaper.options import FILL_OPTIONS, SORT_OPTIONS, SORT_DISPLAYS, VIDEO_EXTENSIONS, SWWW_TRANSITION_TYPES, SWWW_FILTER_TYPES, \
     get_monitor_options, LINUX_WALLPAPERENGINE_FILL_OPTIONS, LINUX_WALLPAPERENGINE_CLAMP
 from waypaper.translations import Chinese, English, French, German, Polish, Russian, Belarusian, Spanish
 from waypaper.keybindings import Keys
+from waypaper.wallpaperengine import get_wallpaperengine_image_name, get_wallpaperengine_preview
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GdkPixbuf, Gdk, GLib
@@ -819,14 +820,23 @@ class App(Gtk.Window):
 
             # Calculate current y coordinate in the scroll window:
             aspect_ratio = thumbnail.get_width() / thumbnail.get_height()
-            current_row_heights[column] = int(240 / aspect_ratio)
+            current_row_heights[column] = int(240 / aspect_ratio) + 34
             if column == 0:
                 current_y += max(current_row_heights) + 10
                 current_row_heights = [0]*self.cf.number_of_columns
 
-            # Create a button with an image and add tooltip:
+            # Create a button with an image and a visible label.
             image = Gtk.Image.new_from_pixbuf(thumbnail)
             image.set_tooltip_text(name)
+            label = Gtk.Label(label=name)
+            label.set_max_width_chars(28)
+            label.set_line_wrap(True)
+            label.set_justify(Gtk.Justification.CENTER)
+
+            content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            content_box.pack_start(image, False, False, 0)
+            content_box.pack_start(label, False, False, 0)
+
             button = Gtk.Button()
             if index == self.selected_index:
                 button.set_relief(Gtk.ReliefStyle.NORMAL)
@@ -834,7 +844,7 @@ class App(Gtk.Window):
                 self.highlighted_image_y = current_y
             else:
                 button.set_relief(Gtk.ReliefStyle.NONE)
-            button.add(image)
+            button.add(content_box)
 
             # Add button to the grid and connect clicked event:
             self.grid.attach(button, column, row, 1, 1)
