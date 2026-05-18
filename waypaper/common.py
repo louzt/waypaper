@@ -1,6 +1,7 @@
 """Module with some of the common functions, like file and image operations"""
 
 import os
+import re
 from os import PathLike
 
 import gi
@@ -17,6 +18,30 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GdkPixbuf, Gdk, GLib
 
 from waypaper.options import IMAGE_EXTENSIONS, BACKEND_OPTIONS, VIDEO_EXTENSIONS
+
+
+WEB_WALLPAPER_SCAN_EXTENSIONS = {".html", ".htm", ".js", ".mjs"}
+WEB_WALLPAPER_SCAN_PATTERNS = (
+    (
+        "web-mouse-interaction",
+        re.compile(r"mousemove|pointermove|touchmove|\.parallax\s*\(|data-depth|deviceorientation", re.IGNORECASE),
+    ),
+    (
+        "web-audio-reactive",
+        re.compile(r"AudioContext|AnalyserNode|getByteFrequencyData|fft|analyser", re.IGNORECASE),
+    ),
+    (
+        "web-threejs",
+        re.compile(r"\bTHREE\b|three(?:\.min)?\.js|WebGLRenderer", re.IGNORECASE),
+    ),
+    (
+        "web-wallpaper-engine-api",
+        re.compile(
+            r"wallpaperPropertyListener|applyUserProperties|registerAudioListener|registerMediaPlaybackListener|window\.wallpaper",
+            re.IGNORECASE,
+        ),
+    ),
+)
 
 
 def has_image_extension(file_path: str, backend: str) -> bool:
@@ -73,15 +98,72 @@ def get_wallpaperengine_preview(wallpaperengine_folder: Path | str) -> List[str]
     return image_path_list
 
 
-def get_wallpaperengine_project(full_path: Path | str) -> dict:
+def get_wallpaperengine_project_dir(full_path: Path | str) -> Path:
     full_path = Path(full_path)
-    image_dir = full_path.parent
+    return full_path if full_path.is_dir() else full_path.parent
+
+
+def get_wallpaperengine_project(full_path: Path | str) -> dict:
+    image_dir = get_wallpaperengine_project_dir(full_path)
     with open(image_dir / "project.json", "r") as f:
         project = json.load(f)
     wallpaper_type = str(project.get("type", "unknown")).strip().lower() or "unknown"
     project["type"] = wallpaper_type
     project["title"] = str(project.get("title") or image_dir.name)
     return project
+
+
+def get_wallpaperengine_entry_path(full_path: Path | str) -> Path | None:
+    image_dir = get_wallpaperengine_project_dir(full_path)
+    project = get_wallpaperengine_project(image_dir)
+    entry_name = project.get("file")
+    if not entry_name:
+        return None
+
+    entry_path = image_dir / entry_name
+    if entry_path.exists():
+        return entry_path
+    return None
+
+
+def _read_wallpaperengine_text(file_path: Path, max_bytes: int = 512_000) -> str:
+    try:
+        with file_path.open("r", encoding="utf-8", errors="ignore") as f:
+            return f.read(max_bytes)
+    except OSError:
+        return ""
+
+
+def get_wallpaperengine_web_compatibility_tags(full_path: Path | str) -> list[str]:
+    project_dir = get_wallpaperengine_project_dir(full_path)
+    entry_path = get_wallpaperengine_entry_path(project_dir)
+    if entry_path is None or not entry_path.exists():
+        return []
+
+    candidate_files: list[Path] = []
+    if entry_path.suffix.lower() in WEB_WALLPAPER_SCAN_EXTENSIONS:
+        candidate_files.append(entry_path)
+
+    for candidate in sorted(project_dir.rglob("*")):
+        if not candidate.is_file():
+            continue
+        if candidate == entry_path:
+            continue
+        if candidate.suffix.lower() not in WEB_WALLPAPER_SCAN_EXTENSIONS:
+            continue
+        candidate_files.append(candidate)
+        if len(candidate_files) >= 24:
+            break
+
+    scanned_text = "\n".join(_read_wallpaperengine_text(candidate) for candidate in candidate_files)
+    if not scanned_text:
+        return []
+
+    compatibility_tags: list[str] = []
+    for tag, pattern in WEB_WALLPAPER_SCAN_PATTERNS:
+        if pattern.search(scanned_text):
+            compatibility_tags.append(tag)
+    return compatibility_tags
 
 def get_wallpaperengine_image_name(full_path: Path | str) -> str:
     full_path = Path(full_path)
