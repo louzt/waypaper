@@ -2,6 +2,7 @@
 
 import threading
 import subprocess
+import sys
 import os
 import gi
 import random
@@ -12,10 +13,11 @@ from pathlib import Path
 from waypaper.changer import change_wallpaper
 from waypaper.config import Config
 from waypaper.common import get_image_paths, get_wallpaperengine_preview, get_image_name, get_random_file, cache_image, get_cached_image_path, get_wallpaperengine_image_name
-from waypaper.options import FILL_OPTIONS, SORT_OPTIONS, SORT_DISPLAYS, VIDEO_EXTENSIONS, SWWW_TRANSITION_TYPES, \
+from waypaper.options import FILL_OPTIONS, SORT_OPTIONS, SORT_DISPLAYS, VIDEO_EXTENSIONS, SWWW_TRANSITION_TYPES, SWWW_FILTER_TYPES, \
     get_monitor_options, LINUX_WALLPAPERENGINE_FILL_OPTIONS, LINUX_WALLPAPERENGINE_CLAMP
 from waypaper.translations import Chinese, English, French, German, Polish, Russian, Belarusian, Spanish
 from waypaper.keybindings import Keys
+from waypaper.waypaperd_manager import WaypaperdManager
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GdkPixbuf, Gdk, GLib
@@ -29,10 +31,15 @@ class App(Gtk.Window):
         self.cf = cf
         self.txt = txt
         self.keys = Keys(cf)
+        self.waypaperd_manager = WaypaperdManager()
         self.check_backends()
         self.set_default_size(820, 600)
         self.connect("delete-event", Gtk.main_quit)
         self.selected_index = 0
+        self.caching_images_lock: threading.Lock = threading.Lock()
+        self.loading_label: Gtk.Label | None = None
+        self.thumbnails: list[GdkPixbuf.Pixbuf] = []
+        self.image_names: list[str] = []
         self.highlighted_image_row = 0
         self.is_enering_text = False
         self.number_of_resize = 0
@@ -207,6 +214,41 @@ class App(Gtk.Window):
         self.bottom_button_box.set_margin_bottom(15)
         self.main_box.pack_end(self.bottom_button_box, False, False, 0)
 
+        # SLIDESHOW PANEL (above backend buttons)
+        self.slideshow_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.slideshow_box.set_margin_bottom(5)
+
+        self.slideshow_row_alignment = Gtk.Alignment(xalign=0.5, yalign=0.0, xscale=0.0, yscale=0.0)
+        self.slideshow_box.pack_start(self.slideshow_row_alignment, True, False, 0)
+
+        self.slideshow_inner_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.slideshow_row_alignment.add(self.slideshow_inner_box)
+
+        self.slideshow_label = Gtk.Label(label=self.txt.msg_change_wallpaper_every)
+        self.slideshow_inner_box.pack_start(self.slideshow_label, False, False, 0)
+
+        self.slideshow_interval_entry = Gtk.Entry()
+        self.slideshow_interval_entry.set_width_chars(5)
+        self.slideshow_interval_entry.set_text(str(self.cf.slideshow_interval))
+        self.slideshow_interval_entry.set_tooltip_text(self.txt.tip_timer)
+        self.slideshow_interval_entry.connect("focus-in-event", self.on_focus_in)
+        self.slideshow_interval_entry.connect("focus-out-event", self.on_focus_out)
+        self.slideshow_inner_box.pack_start(self.slideshow_interval_entry, False, False, 0)
+
+        self.slideshow_minutes_label = Gtk.Label(label="min")
+        self.slideshow_inner_box.pack_start(self.slideshow_minutes_label, False, False, 0)
+
+        self.slideshow_start_button = Gtk.Button(label=self.txt.msg_daemon_start)
+        self.slideshow_start_button.set_tooltip_text(self.txt.tip_start)
+        self.slideshow_start_button.connect("clicked", self.on_daemon_start_clicked)
+        self.slideshow_inner_box.pack_start(self.slideshow_start_button, False, False, 0)
+
+        self.slideshow_stop_button = Gtk.Button(label=self.txt.msg_daemon_stop)
+        self.slideshow_stop_button.connect("clicked", self.on_daemon_stop_clicked)
+        self.slideshow_inner_box.pack_start(self.slideshow_stop_button, False, False, 0)
+
+        self.main_box.pack_end(self.slideshow_box, False, False, 0)
+
         # Create a box to contain the loading label:
         self.bottom_loading_box = Gtk.HBox(spacing=0)
         self.bottom_loading_box.set_margin_bottom(0)
@@ -226,6 +268,7 @@ class App(Gtk.Window):
 
         # Create a transition type dropdown menu for swww
         self.swww_transitions_options = Gtk.ComboBoxText()
+        self.swww_filter_options = Gtk.ComboBoxText()
 
         #  Get angle for animation
         self.swww_angle_entry = Gtk.Entry()
@@ -362,6 +405,9 @@ class App(Gtk.Window):
         # self.connect("size-allocate", self.on_window_resize)
 
         self.show_all()
+        self.slideshow_box.set_no_show_all(True)
+        self.slideshow_box.set_visible(self.cf.show_slideshow_panel)
+        self.update_slideshow_button()
 
     def create_fill_option_combo(self):
         # Create a fill option dropdown menu:
@@ -430,6 +476,12 @@ class App(Gtk.Window):
         self.zen_mode_checkbox.connect("toggled", self.on_zen_mode_toggled)
         self.menu.append(self.zen_mode_checkbox)
 
+        # Create slideshow panel toggle:
+        self.show_slideshow_panel_checkbox = Gtk.CheckMenuItem(label=self.txt.msg_slideshow_panel)
+        self.show_slideshow_panel_checkbox.set_active(self.cf.show_slideshow_panel)
+        self.show_slideshow_panel_checkbox.connect("toggled", self.on_slideshow_panel_toggled)
+        self.menu.append(self.show_slideshow_panel_checkbox)
+
         self.menu.show_all()
 
 
@@ -469,6 +521,7 @@ class App(Gtk.Window):
     def swww_or_awww_options_display(self) -> None:
         """Show swww transition options if backend is swww or awww"""
         self.options_box.remove(self.swww_transitions_options)
+        self.options_box.remove(self.swww_filter_options)
         self.options_box.remove(self.swww_angle_entry)
         self.options_box.remove(self.swww_steps_entry)
         self.options_box.remove(self.swww_fps_entry)
@@ -487,10 +540,21 @@ class App(Gtk.Window):
             self.swww_transitions_options.connect("changed", self.on_transition_option_changed)
             self.swww_transitions_options.set_tooltip_text(self.txt.tip_transition)
 
+        self.swww_filter_options = Gtk.ComboBoxText()
+        for filter_type in SWWW_FILTER_TYPES:
+            self.swww_filter_options.append_text(filter_type)
+        active_filter = 0
+        if self.cf.swww_filter in SWWW_FILTER_TYPES:
+            active_filter = SWWW_FILTER_TYPES.index(self.cf.swww_filter)
+        self.swww_filter_options.set_active(active_filter)
+        self.swww_filter_options.connect("changed", self.on_filter_option_changed)
+        self.swww_filter_options.set_tooltip_text(getattr(self.txt, "tip_filter", "Choose scaling filter"))
+
         self.options_box.pack_end(self.swww_steps_entry, False, False, 0)
         self.options_box.pack_end(self.swww_fps_entry, False, False, 0)
         self.options_box.pack_end(self.swww_angle_entry, False, False, 0)
         self.options_box.pack_end(self.swww_duration_entry, False, False, 0)
+        self.options_box.pack_end(self.swww_filter_options, False, False, 0)
         self.options_box.pack_end(self.swww_transitions_options, False, False, 0)
 
     def hyprland_restart_button_display(self) -> None:
@@ -535,7 +599,7 @@ class App(Gtk.Window):
         """Display fill option if backend are not linux-wallpaperengine or hyprpaper"""
         self.options_box.remove(self.fill_option_combo)
         self.options_box.remove(self.fill_option_combo_linux_wallpaperengine)
-        if self.cf.backend not in ['linux-wallpaperengine', 'hyprpaper', 'none']:
+        if self.cf.backend not in ['linux-wallpaperengine', 'hyprpaper', 'none', 'macos']:
             self.options_box.pack_end(self.fill_option_combo, False, False, 0)
         elif self.cf.backend == 'linux-wallpaperengine':
             self.options_box.pack_end(self.fill_option_combo_linux_wallpaperengine, False, False, 0)
@@ -606,7 +670,7 @@ class App(Gtk.Window):
     def color_picker_display(self):
         """Display color option if backend is not hyprpaper"""
         self.options_box.remove(self.color_picker_button)
-        if self.cf.backend not in ['linux-wallpaperengine', 'hyprpaper', 'none']:
+        if self.cf.backend not in ['linux-wallpaperengine', 'hyprpaper', 'none', 'macos']:
             self.options_box.pack_end(self.color_picker_button, False, False, 0)
 
     def check_backends(self) -> None:
@@ -626,11 +690,44 @@ class App(Gtk.Window):
         )
         dialog.run()
         dialog.destroy()
-
+        
+    def show_caching_label(self) -> None:
+        if self.loading_label:
+            return
+        
+        self.loading_label = Gtk.Label(label=self.txt.msg_caching)
+        self.bottom_loading_box.add(self.loading_label)
+        self.bottom_loading_box.show_all()
+        
+    def remove_caching_label(self) -> None:
+        if not self.loading_label:
+            return
+        
+        # If this is still locked, then another process job started, just leave the label alone to prevent flashing
+        if self.caching_images_lock.locked():
+            return
+        
+        self.bottom_loading_box.remove(self.loading_label)
+        self.loading_label = None
 
     def process_images(self) -> None:
         """Load images from the selected folder, resize them, and arrange into a grid"""
-
+        
+        # Only allow one process operation at a time, but let the others run afterwards
+        with self.caching_images_lock:
+            GLib.idle_add(self.refresh_button.set_sensitive, False)
+            # Show caching label:
+            GLib.idle_add(self.show_caching_label)
+            
+            try:
+                self.process_images_inner()
+            finally:
+                GLib.idle_add(self.refresh_button.set_sensitive, True)
+                # When image processing is done, remove caching label and display the images:
+                GLib.idle_add(self.remove_caching_label)
+                GLib.idle_add(self.load_image_grid)
+        
+    def process_images_inner(self) -> None:
         if self.cf.backend == "linux-wallpaperengine":
             self.image_paths = get_wallpaperengine_preview(self.cf.wallpaperengine_folder)
         else:
@@ -644,11 +741,6 @@ class App(Gtk.Window):
             self.image_paths.sort(key=lambda x: os.path.getmtime(x), reverse=(self.cf.sort_option == "daterev"))
         if self.cf.sort_option == "random":
             random.shuffle(self.image_paths)
-
-        # Show caching label:
-        self.loading_label = Gtk.Label(label=self.txt.msg_caching)
-        self.bottom_loading_box.add(self.loading_label)
-        self.bottom_loading_box.show_all()
 
         self.thumbnails = []
         self.image_names = []
@@ -668,24 +760,35 @@ class App(Gtk.Window):
             cached_image_path = get_cached_image_path(image_path, self.cf.cache_dir)
             if not cached_image_path.exists():
                 cache_image(image_path, self.cf.cache_dir)
+                
+            thumbnail: GdkPixbuf.Pixbuf | None = None
 
-            # Load cached thumbnail:
-            thumbnail = GdkPixbuf.Pixbuf.new_from_file(str(cached_image_path))
-            self.thumbnails.append(thumbnail)
+            try:
+                # Load cached thumbnail:
+                thumbnail = GdkPixbuf.Pixbuf.new_from_file(str(cached_image_path))
+                
+                if thumbnail:
+                    self.thumbnails.append(thumbnail)
+                else:
+                    print("Failed to load cached thumbnail, None returned")
+                    continue
+            except GLib.GError:
+                # This could happen before because of a race-condition, probably can't happen now, but it's not bad to check
+                print(f"Failed to load cached thumbnail at path {cached_image_path}")
+                continue
 
             # Get image name, which may or may not include parent folders:
             if self.cf.backend == 'linux-wallpaperengine':
                 image_name = get_wallpaperengine_image_name(image_path)
             else:
                 image_name = get_image_name(image_path, self.cf.image_folder_list, self.cf.show_path_in_tooltip)
+            if not image_name:
+                self.thumbnails.remove(thumbnail)
+                print("Failed to get image name")
+                continue
             self.image_names.append(image_name)
 
-        # When image processing is done, remove caching label and display the images:
-        self.bottom_loading_box.remove(self.loading_label)
-        GLib.idle_add(self.load_image_grid)
-
-
-    def get_filtered_images(self) -> list:
+    def get_filtered_images(self) -> tuple[list[GdkPixbuf.Pixbuf], list[str], list[str]]:
         """Filter image paths, names, and thumbnails based on the search query, if any"""
         # Read what is written in the search bar, and if nothing, return all images:
         search_query = self.search_entry.get_text().lower()
@@ -920,6 +1023,13 @@ class App(Gtk.Window):
         print(f"Transition type changed to: {self.cf.swww_transition_type}")
 
 
+    def on_filter_option_changed(self, combo) -> None:
+        """Update the scaling filter based on the selected option"""
+        active_index = combo.get_active()
+        self.cf.swww_filter = SWWW_FILTER_TYPES[active_index]
+        print(f"Filter changed to: {self.cf.swww_filter}")
+
+
     def on_color_set(self, color_button):
         """Convert selected color to web format"""
         rgba_color = color_button.get_rgba()
@@ -937,6 +1047,12 @@ class App(Gtk.Window):
 
     def on_refresh_clicked(self, widget) -> None:
         """On clicking refresh button, clear cache"""
+        
+        # Manual refreshes should just be cancelled if wallpapers are being cached
+        # The button is also disabled during this operation, but it doesn't hurt to check
+        if self.caching_images_lock.locked():
+            return
+        
         self.clear_cache()
 
     def on_hyprland_restart(self, widget) -> None:
@@ -968,6 +1084,61 @@ class App(Gtk.Window):
         elif self.cf.backend == "gslapper":
             # gSlapper doesn't support pause, so do nothing or show message
             print("Pause not supported for gSlapper")
+
+    def is_waypaperd_running(self) -> bool:
+        return self.waypaperd_manager.check()
+
+    def update_slideshow_button(self) -> None:
+        is_supported = self.waypaperd_manager.is_supported()
+        is_running = self.is_waypaperd_running()
+        self.slideshow_start_button.set_sensitive(is_supported)
+        self.slideshow_stop_button.set_sensitive(is_supported and is_running)
+        if is_running:
+            self.slideshow_start_button.set_label(self.txt.msg_daemon_restart)
+        else:
+            self.slideshow_start_button.set_label(self.txt.msg_daemon_start)
+
+    def on_daemon_start_clicked(self, widget) -> None:
+        interval_text = self.slideshow_interval_entry.get_text()
+        try:
+            interval_minutes = int(interval_text)
+            if interval_minutes <= 0:
+                interval_minutes = 60
+        except ValueError:
+            interval_minutes = 60
+
+        self.cf.slideshow_interval = interval_minutes
+        self.cf.slideshow_enabled = True
+        self.cf.save()
+
+        if self.is_waypaperd_running():
+            success = self.waypaperd_manager.restart()
+        else:
+            success = self.waypaperd_manager.launch()
+
+        if success:
+            self.update_slideshow_button()
+            return
+
+        self.cf.slideshow_enabled = self.is_waypaperd_running()
+        self.cf.save()
+        self.update_slideshow_button()
+        print("Couldn't control the waypaperd user service. See documentation on how to enable it.")
+
+    def on_daemon_stop_clicked(self, widget) -> None:
+        success = self.waypaperd_manager.stop()
+        if success or not self.is_waypaperd_running():
+            self.cf.slideshow_enabled = False
+            self.cf.save()
+            self.update_slideshow_button()
+            return
+
+        print("Couldn't stop the waypaperd user service. See documentation on how to enable it.")
+
+    def on_slideshow_panel_toggled(self, toggle) -> None:
+        self.cf.show_slideshow_panel = toggle.get_active()
+        self.slideshow_box.set_visible(self.cf.show_slideshow_panel)
+        self.cf.save()
 
     def on_random_clicked(self, widget) -> None:
         """On clicking random button, set random wallpaper"""
@@ -1014,7 +1185,7 @@ class App(Gtk.Window):
         if self.is_enering_text:
             if event.keyval in self.keys.clear_input_fields:
                 self.reset_input_fields()
-            return
+            return False
 
         # Processing rest of the keys:
         elif event.keyval in self.keys.quit:
@@ -1111,6 +1282,8 @@ class App(Gtk.Window):
         self.swww_duration_entry.set_visible(True)
         self.swww_fps_entry.set_visible(False)
         self.swww_fps_entry.set_visible(True)
+        self.slideshow_interval_entry.set_visible(False)
+        self.slideshow_interval_entry.set_visible(True)
         self.main_box.grab_focus()
         self.is_enering_text = False
 
@@ -1134,5 +1307,20 @@ class App(Gtk.Window):
     def run(self) -> None:
         """Run GUI application"""
         self.connect("destroy", self.on_exit_clicked)
+
+        # GTK doesn't read macOS system preferences, so we detect dark mode manually
+        # and apply GTK's prefer-dark flag to match the system appearance.
+        if sys.platform == "darwin":
+            try:
+                result = subprocess.run(["defaults", "read", "-g", "AppleInterfaceStyle"],
+                                        capture_output=True, text=True)
+                if result.stdout.strip() == "Dark":
+                    Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
+            except Exception:
+                pass
+
         self.show_all()
+        if sys.platform == "darwin":
+            subprocess.Popen(["osascript", "-e",
+                f"tell application \"System Events\" to set frontmost of first process whose unix id is {os.getpid()} to true"])
         Gtk.main()
