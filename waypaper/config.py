@@ -6,7 +6,7 @@ from argparse import Namespace
 from typing import List
 from platformdirs import user_config_path, user_pictures_path, user_cache_path, user_state_path
 
-from waypaper.options import FILL_OPTIONS, SORT_OPTIONS, SWWW_TRANSITION_TYPES, BACKEND_OPTIONS, \
+from waypaper.options import FILL_OPTIONS, SORT_OPTIONS, SWWW_TRANSITION_TYPES, SWWW_FILTER_TYPES, BACKEND_OPTIONS, \
     LINUX_WALLPAPERENGINE_CLAMP
 from waypaper.common import check_installed_backends
 
@@ -29,6 +29,7 @@ class Config:
         self.color = "#ffffff"
         self.number_of_columns = 3
         self.swww_transition_type = SWWW_TRANSITION_TYPES[0]
+        self.swww_filter = SWWW_FILTER_TYPES[-1]
         self.swww_transition_step = 63
         self.swww_transition_angle = 0
         self.swww_transition_duration = 2
@@ -54,6 +55,10 @@ class Config:
         self.use_xdg_state = False
         self.use_post_command = True
         self.show_path_in_tooltip = True
+        self.waypaperd_cycle_length = 1800
+        self.slideshow_interval = 60
+        self.slideshow_enabled = False
+        self.show_slideshow_panel = False
 
         # options for linux-wallpaperengine
         self.linux_wallpaperengine_clamp = LINUX_WALLPAPERENGINE_CLAMP[0]
@@ -106,6 +111,7 @@ class Config:
         self.color = config.get("Settings", "color", fallback=self.color)
         self.post_command = config.get("Settings", "post_command", fallback=self.post_command)
         self.swww_transition_type = config.get("Settings", "swww_transition_type", fallback=self.swww_transition_type)
+        self.swww_filter = config.get("Settings", "swww_filter", fallback=self.swww_filter)
         self.swww_transition_step = config.get("Settings", "swww_transition_step", fallback=self.swww_transition_step)
         self.swww_transition_angle = config.get("Settings", "swww_transition_angle", fallback=self.swww_transition_angle)
         self.swww_transition_duration = config.get("Settings", "swww_transition_duration", fallback=self.swww_transition_duration)
@@ -121,6 +127,10 @@ class Config:
         self.zen_mode = config.getboolean("Settings", "zen_mode", fallback=self.zen_mode)
         self.use_xdg_state = config.getboolean("Settings", "use_xdg_state", fallback=self.use_xdg_state)
         self.show_path_in_tooltip = config.getboolean("Settings", "show_path_in_tooltip", fallback=self.show_path_in_tooltip)
+        self.waypaperd_cycle_length = int(config.get("Settings", "waypaperd_cycle_length", fallback=self.waypaperd_cycle_length))
+        self.slideshow_interval = config.getint("Settings", "slideshow_interval", fallback=self.slideshow_interval)
+        self.slideshow_enabled = config.getboolean("Settings", "slideshow_enabled", fallback=self.slideshow_enabled)
+        self.show_slideshow_panel = config.getboolean("Settings", "show_slideshow_panel", fallback=self.show_slideshow_panel)
         self.style_file = config.get("Settings", "stylesheet", fallback=self.style_file)
         self.keybindings_file = pathlib.Path(config.get("Settings", "keybindings", fallback=self.keybindings_file)).expanduser()
         self.wallpaperengine_folder = pathlib.Path(config.get("Settings", "wallpaperengine_folder", fallback=self.wallpaperengine_folder)).expanduser()
@@ -181,6 +191,14 @@ class Config:
             self.fill_option = FILL_OPTIONS[0]
         if self.swww_transition_type not in SWWW_TRANSITION_TYPES:
             self.swww_transition_type = "any"
+        if self.swww_filter not in SWWW_FILTER_TYPES:
+            self.swww_filter = next(
+                (
+                    filter_type for filter_type in SWWW_FILTER_TYPES
+                    if str(self.swww_filter).lower() == filter_type.lower()
+                ),
+                SWWW_FILTER_TYPES[-1]
+            )
         if self.number_of_columns <= 0:
             self.number_of_columns = 1
 
@@ -193,6 +211,10 @@ class Config:
             self.swww_transition_duration = 2
         if 0 > int(self.swww_transition_fps):
             self.swww_transition_fps = 60
+        if int(self.waypaperd_cycle_length) <= 0:
+            self.waypaperd_cycle_length = 1800
+        if self.slideshow_interval <= 0:
+            self.slideshow_interval = 60
 
 
     def attribute_selected_wallpaper(self) -> None:
@@ -271,8 +293,13 @@ class Config:
         config.set("Settings", "show_gifs_only", str(self.show_gifs_only))
         config.set("Settings", "zen_mode", str(self.zen_mode))
         config.set("Settings", "post_command", self.post_command)
+        config.set("Settings", "waypaperd_cycle_length", str(self.waypaperd_cycle_length))
+        config.set("Settings", "slideshow_interval", str(self.slideshow_interval))
+        config.set("Settings", "slideshow_enabled", str(self.slideshow_enabled))
+        config.set("Settings", "show_slideshow_panel", str(self.show_slideshow_panel))
         config.set("Settings", "number_of_columns", str(self.number_of_columns))
         config.set("Settings", "swww_transition_type", str(self.swww_transition_type))
+        config.set("Settings", "swww_filter", str(self.swww_filter))
         config.set("Settings", "swww_transition_step", str(self.swww_transition_step))
         config.set("Settings", "swww_transition_angle", str(self.swww_transition_angle))
         config.set("Settings", "swww_transition_duration", str(self.swww_transition_duration))

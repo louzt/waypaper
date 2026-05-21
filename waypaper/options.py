@@ -20,7 +20,7 @@ IMAGE_EXTENSIONS: Dict[str, List[str]] = {
         BACKEND_OPTIONS[0]: ['.gif', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.pnm', '.tiff'],
         BACKEND_OPTIONS[1]: ['.gif', '.jpg', '.jpeg', '.png'],
         BACKEND_OPTIONS[2]: ['.gif', '.jpg', '.jpeg', '.jxl', '.png', '.webp', '.bmp', '.pnm', '.tiff'],
-        BACKEND_OPTIONS[3]: ['.gif', '.jpg', '.jpeg', '.png', '.bmp', '.pnm', '.tiff'],
+        BACKEND_OPTIONS[3]: ['.gif', '.jpg', '.jpeg', '.png', '.bmp', '.pnm', '.tiff', '.webp'],
         BACKEND_OPTIONS[4]: ['.jpeg', '.png'],
         BACKEND_OPTIONS[5]: ['.gif', '.jpg', '.jpeg', '.png'],
         BACKEND_OPTIONS[6]: ['.jpg', '.jpeg', '.png', '.webp', '.jxl'],
@@ -33,6 +33,7 @@ IMAGE_EXTENSIONS: Dict[str, List[str]] = {
 
 SWWW_TRANSITION_TYPES: List[str] = ["any", "none", "simple", "fade", "wipe",  "left", "right", "top",
                                 "bottom", "wave", "grow", "center", "outer", "random"]
+SWWW_FILTER_TYPES: List[str] = ["Nearest", "Bilinear", "CatmullRom", "Mitchell", "Lanczos3"]
 
 TIMERS: Dict[str, int] = {"30 sec": 30, "1 min": 60, "2 min": 120, "5 min": 300, "10 min": 600, "30 min": 1800, "1 hour": 3600,
           "2 hours": 7200, "6 hours": 21600, "12 hours": 43200, "1 day": 86400, "1 week": 604800}
