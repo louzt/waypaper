@@ -1,5 +1,7 @@
 """Module that runs the system processes to change the wallpaper"""
 
+import atexit
+import os
 import shlex
 import subprocess
 import time
@@ -7,9 +9,59 @@ from typing import Optional
 from pathlib import Path
 import screeninfo
 
+from waypaper import override_file
 from waypaper.config import Config
 from waypaper.options import get_monitor_names_with_hyprctl, LINUX_WALLPAPERENGINE_CLAMP, \
     LINUX_WALLPAPERENGINE_FILL_OPTIONS
+
+
+# Register a single atexit hook (idempotent across reimports) that drops
+# override entries whose backing process has died. Live entries (e.g. a
+# long-running linux-wallpaperengine launched from CLI mode where waypaper
+# itself exits with `sys.exit(0)`) are left alone so the reader can keep
+# the monitor marked as externally owned.
+_OVERRIDE_CLEANUP_REGISTERED = False
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ProcessLookupError, ValueError):
+        return False
+
+
+def _atexit_cleanup_overrides() -> None:
+    """Remove override entries whose backing process has died.
+
+    In CLI mode (``waypaper --wallpaper foo``), waypaper exits while the
+    wallpaper backend (e.g. linux-wallpaperengine) keeps running. The
+    override entry must stay so the reader knows the monitor is owned.
+    In GUI mode, when the user closes waypaper, the child backend may or
+    may not still be alive (depends on the backend); we let the liveness
+    check decide per-entry.
+    """
+    try:
+        overrides = override_file.read_overrides()
+    except Exception:
+        return
+    if not overrides:
+        return
+    for monitor, entry in list(overrides.items()):
+        pid = entry.get("pid") if isinstance(entry, dict) else None
+        if not pid or not _is_pid_alive(pid):
+            try:
+                override_file.clear_override(monitor)
+            except Exception:
+                pass
+
+
+def _ensure_override_cleanup_registered() -> None:
+    global _OVERRIDE_CLEANUP_REGISTERED
+    if _OVERRIDE_CLEANUP_REGISTERED:
+        return
+    atexit.register(_atexit_cleanup_overrides)
+    _OVERRIDE_CLEANUP_REGISTERED = True
 
 
 def format_post_command(
@@ -156,7 +208,11 @@ def change_with_swaybg(image_path: Path, cf: Config, monitor: str):
         command.extend(["-o", monitor])
     command.extend(["-i", str(image_path)])
     command.extend(["-m", fill, "-c", cf.color])
-    subprocess.Popen(command)
+    process = subprocess.Popen(command)
+
+    # Record the override so external compositors can yield this monitor.
+    _ensure_override_cleanup_registered()
+    override_file.set_override(monitor, "swaybg", process.pid)
 
     # Kill previous swaybg process once new wallpaper is set:
     if pid:
@@ -182,6 +238,15 @@ def change_with_mpvpaper(image_path: Path, cf: Config, monitor: str):
         time.sleep(0.2)
         print(f"Detected running mpvpaper on {monitor}, now trying to call mpvpaper socket")
         subprocess.Popen(f"echo 'loadfile \"{image_path}\"' | socat - /tmp/mpv-socket-{monitor}", shell=True)
+        # Reused existing mpvpaper — refresh the override's timestamp so the
+        # reader doesn't think it's stale; the existing PID still owns the monitor.
+        try:
+            existing_pid = find_process_pid(f"socket-{monitor}")
+            if existing_pid:
+                _ensure_override_cleanup_registered()
+                override_file.set_override(monitor, "mpvpaper", existing_pid)
+        except Exception:
+            pass
 
     # If mpvpaper is not running, create a new process in a new socket:
     except subprocess.CalledProcessError:
@@ -201,7 +266,9 @@ def change_with_mpvpaper(image_path: Path, cf: Config, monitor: str):
         command.extend([image_path])
 
         print(f"{command=}")
-        subprocess.Popen(command)
+        process = subprocess.Popen(command)
+        _ensure_override_cleanup_registered()
+        override_file.set_override(monitor, "mpvpaper", process.pid)
 
 
 def change_with_gslapper(image_path: Path, cf: Config, monitor: str):
@@ -252,7 +319,9 @@ def change_with_gslapper(image_path: Path, cf: Config, monitor: str):
     command.append(str(image_path))
     
     print(f"gSlapper command: {command}")
-    subprocess.Popen(command)
+    process = subprocess.Popen(command)
+    _ensure_override_cleanup_registered()
+    override_file.set_override(monitor, "gslapper", process.pid)
 
 
 def change_with_swww(image_path: Path, cf: Config, monitor: str):
@@ -300,6 +369,19 @@ def change_with_swww(image_path: Path, cf: Config, monitor: str):
         command.extend(["--outputs", monitor])
     subprocess.run(command)
 
+    # Record the override. swww-daemon is the long-running owner; record its
+    # PID (not the short-lived `swww img` subprocess) so the reader can
+    # detect the daemon's death and fall back.
+    try:
+        daemon_pid = int(subprocess.check_output(
+            ["pgrep", "-o", "swww-daemon"], encoding="utf-8"
+        ).strip().splitlines()[0])
+        _ensure_override_cleanup_registered()
+        override_file.set_override(monitor, "swww", daemon_pid)
+    except (subprocess.CalledProcessError, ValueError, IndexError):
+        pass
+
+
 def change_with_awww(image_path: Path, cf: Config, monitor: str):
     """Change wallpaper with awww backend"""
 
@@ -344,6 +426,17 @@ def change_with_awww(image_path: Path, cf: Config, monitor: str):
     if monitor != "All":
         command.extend(["--outputs", monitor])
     subprocess.run(command)
+
+    # Record the override for the long-running awww-daemon.
+    try:
+        daemon_pid = int(subprocess.check_output(
+            ["pgrep", "-o", "awww-daemon"], encoding="utf-8"
+        ).strip().splitlines()[0])
+        _ensure_override_cleanup_registered()
+        override_file.set_override(monitor, "awww", daemon_pid)
+    except (subprocess.CalledProcessError, ValueError, IndexError):
+        pass
+
 
 def change_with_feh(image_path: Path, cf: Config, monitor: str):
     """Change wallpaper with feh backend"""
@@ -501,6 +594,13 @@ def change_with_linux_wallpaperengine(image_path: Path, cf: Config, monitor: str
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+
+    # Record the override so external compositors (DMS, etc.) know this monitor
+    # is owned. If the process exits immediately, the entry becomes stale; the
+    # reader detects a dead PID and falls back.
+    _ensure_override_cleanup_registered()
+    override_file.set_override(monitor, "linux-wallpaperengine", process.pid)
+
     time.sleep(0.5)
     exit_code = process.poll()
     if exit_code is not None:
@@ -512,6 +612,11 @@ def change_wallpaper(image_path: Path, cf: Config, monitor: str):
     """Run system commands to change the wallpaper depending on the backend"""
 
     print(f"Selected file: {image_path}")
+
+    # Clear any stale override for this monitor before launching a new backend.
+    # The new backend will write a fresh entry with its own PID.
+    _ensure_override_cleanup_registered()
+    override_file.clear_override(monitor)
 
     try:
         if cf.backend == "swaybg":
